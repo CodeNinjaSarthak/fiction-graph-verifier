@@ -1,0 +1,24 @@
+# Gutenberg book IDs to download and index
+gutenberg_books:
+  - 1342 # Pride and Prejudice
+  - 11 # Alice in Wonderland
+
+# Model configurations
+models:
+  embedding: "sentence-transformers/all-MiniLM-L6-v2"
+  llm: "Qwen/Qwen2-0.5B"
+  device: "auto" # auto-detect GPU/CPU
+
+# Pathway vector store settings
+pathway:
+  chunk_size: 500
+  chunk_overlap: 50
+
+# Inference settings
+inference:
+  max_tokens: 256
+  batch_size: 4
+
+# Retrieval settings
+retrieval:
+  top_k: 5
