@@ -14,10 +14,12 @@ from typing import Dict, Any
 sys.path.insert(0, str(Path(__file__).parent))
 
 from src.data_loader import download_gutenberg_book, strip_gutenberg_metadata
-from src.pathway_setup import initialize_pathway_store, index_novel
+from src.pathway_setup import chunk_by_paragraphs
 from src.claim_extractor import parse_backstory
-from src.retrieval import retrieve_passages
-from src.consistency_checker import load_model, check_consistency_batch
+from src.consistency_checker import load_model
+from src.graph_schema import WorldGraph
+from src.graph_builder import build_graph_from_book, merge_graphs
+from src.graph_verifier import verify_claim, VerificationResult
 from src.classifier import aggregate_evidence
 
 
@@ -53,24 +55,24 @@ def load_config(config_path: str = "config.yaml") -> Dict[str, Any]:
 def process_test_case(
     story_id: str,
     backstory: str,
-    store: Dict[str, Any],
+    graph: WorldGraph,
     model: Any,
     tokenizer: Any,
     config: Dict[str, Any],
 ) -> tuple:
     """
-    Process a single test case through the pipeline.
+    Process a single test case through the graph-based pipeline.
 
     Args:
         story_id: Unique identifier for the test case
         backstory: Backstory text to check
-        store: Vector store with indexed novels
-        model: Loaded LLM model
+        graph: WorldGraph with indexed knowledge
+        model: Loaded LLM model (used for claim parsing only)
         tokenizer: Loaded tokenizer
         config: Configuration dictionary
 
     Returns:
-        Tuple of (story_id, prediction, rationale)
+        Tuple of (story_id, counts_dict, rationale)
     """
     logger = logging.getLogger(__name__)
     logger.info(f"Processing test case: {story_id}")
@@ -81,38 +83,21 @@ def process_test_case(
 
     if not claims:
         logger.warning(f"No claims extracted for {story_id}")
-        return story_id, 0, "No valid claims found in backstory"
+        return story_id, {"true": 0, "false": 0, "unknown": 0}, "No valid claims found in backstory"
 
-    # Step 2: Retrieve passages for each claim
-    top_k = config.get("retrieval", {}).get("top_k", 5)
-    passages_list = []
+    # Step 2: Verify each claim against the graph
+    results = []
     for claim in claims:
-        passages = retrieve_passages(claim, store, k=top_k)
-        passages_list.append(passages)
-        logger.debug(f"Retrieved {len(passages)} passages for claim: {claim[:50]}...")
+        result, explanation = verify_claim(claim, graph, model, tokenizer)
+        results.append((result, explanation))
+        logger.info(f"Claim: '{claim[:50]}...' -> {result.value}: {explanation[:50]}...")
 
-    # Step 3: Check consistency with LLM
-    max_tokens = config.get("inference", {}).get("max_tokens", 256)
-    batch_size = config.get("inference", {}).get("batch_size", 4)
-    device = config.get("models", {}).get("device", "auto")
+    # Step 3: Aggregate results
+    counts, rationale = aggregate_evidence(results)
 
-    logger.info(f"Checking consistency for {len(claims)} claims...")
-    consistency_results = check_consistency_batch(
-        claims,
-        passages_list,
-        model,
-        tokenizer,
-        max_new_tokens=max_tokens,
-        batch_size=batch_size,
-        device=device,
-    )
+    logger.info(f"Test case {story_id}: {counts}")
 
-    # Step 4: Aggregate results
-    prediction, rationale = aggregate_evidence(consistency_results)
-
-    logger.info(f"Test case {story_id}: prediction={prediction}")
-
-    return story_id, prediction, rationale
+    return story_id, counts, rationale
 
 
 def main():
@@ -156,27 +141,8 @@ def main():
         logger.error("No novels downloaded. Exiting.")
         sys.exit(1)
 
-    # Step 2: Initialize Pathway vector store
-    try:
-        store = initialize_pathway_store(config)
-        logger.info("Pathway vector store initialized")
-    except Exception as e:
-        logger.error(f"Failed to initialize vector store: {str(e)}")
-        sys.exit(1)
-
-    # Step 3: Index all novels
-    logger.info("Indexing novels into vector store...")
-    for book_id, novel_text in novels.items():
-        try:
-            index_novel(novel_text, book_id, store)
-        except Exception as e:
-            logger.error(f"Failed to index book {book_id}: {str(e)}")
-            continue
-
-    logger.info(f"Indexed {len(novels)} novels into vector store")
-
-    # Step 4: Load LLM model ONCE
-    model_name = config.get("models", {}).get("llm", "microsoft/phi-2")
+    # Step 2: Load LLM model ONCE (needed for graph building and claim parsing)
+    model_name = config.get("models", {}).get("llm", "Qwen/Qwen2-0.5B")
     device = config.get("models", {}).get("device", "auto")
 
     logger.info(f"Loading LLM model: {model_name}...")
@@ -187,7 +153,30 @@ def main():
         logger.error(f"Failed to load LLM model: {str(e)}")
         sys.exit(1)
 
-    # Step 5: Process test cases
+    # Step 3: Build knowledge graph from novels
+    logger.info("Building knowledge graph from novels...")
+    graph = WorldGraph()
+
+    for book_id, novel_text in novels.items():
+        try:
+            logger.info(f"Processing book {book_id}...")
+            chunks = chunk_by_paragraphs(novel_text)
+            logger.info(f"Created {len(chunks)} chunks for book {book_id}")
+
+            book_graph = build_graph_from_book(chunks, book_id, model, tokenizer)
+            merge_graphs(graph, book_graph)
+
+            logger.info(f"Book {book_id}: extracted {len(book_graph.entities)} entities, "
+                       f"{len(book_graph.relations)} relations")
+        except Exception as e:
+            logger.error(f"Failed to build graph for book {book_id}: {str(e)}")
+            continue
+
+    stats = graph.get_stats()
+    logger.info(f"Knowledge graph built: {stats['total_entities']} entities, "
+               f"{stats['total_relations']} relations")
+
+    # Step 4: Process test cases
     results = []
 
     # Hardcoded test case: Pride and Prejudice
@@ -203,29 +192,29 @@ def main():
 
     logger.info("Processing hardcoded test case...")
     try:
-        story_id, prediction, rationale = process_test_case(
+        story_id, counts, rationale = process_test_case(
             test_case["story_id"],
             test_case["backstory"],
-            store,
+            graph,
             model,
             tokenizer,
             config,
         )
         results.append(
-            {"story_id": story_id, "prediction": prediction, "rationale": rationale}
+            {"story_id": story_id, "counts": str(counts), "rationale": rationale}
         )
-        logger.info(f"Test case {story_id} completed: prediction={prediction}")
+        logger.info(f"Test case {story_id} completed: {rationale}")
     except Exception as e:
         logger.error(f"Error processing test case: {str(e)}")
 
-    # Step 6: Save results to CSV
+    # Step 5: Save results to CSV
     results_file = "results.csv"
     logger.info(f"Writing results to {results_file}...")
 
     try:
         with open(results_file, "w", newline="", encoding="utf-8") as f:
             writer = csv.DictWriter(
-                f, fieldnames=["story_id", "prediction", "rationale"]
+                f, fieldnames=["story_id", "counts", "rationale"]
             )
             writer.writeheader()
             writer.writerows(results)
