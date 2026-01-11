@@ -1,282 +1,180 @@
-# Kharagpur Data Science Hackathon - Track A: Modular Python Pipeline
+# Narrative Consistency Verification System
 
-A modular consistency checking pipeline that verifies backstory claims against Project Gutenberg novels using Pathway framework for vector search and local transformer models (phi-2) for consistency checking.
+**Kharagpur Data Science Hackathon - Track A**
+
+A graph-based verification system that checks if claims about fictional characters are consistent with knowledge extracted from source novels. Unlike traditional LLM-based approaches, this system uses structured knowledge graphs for verification, eliminating hallucination in the verification step.
+
+## Architecture
+
+```
+[User Claims] --> [Claim Parser (LLM)] --> [Structured Queries]
+                                                   |
+                                                   v
+[Pre-built World Graph] <-- [Graph Verifier] --> [TRUE/FALSE/UNKNOWN]
+        |
+        +-- entities.json (characters, locations, objects)
+        +-- events.json (actions with temporal ordering)
+        +-- edges.json (relationships and event roles)
+        +-- traits.json (character personality traits)
+```
+
+**Two-Tier Design:**
+1. **World Building (Colab/GPU)**: Extract knowledge graph from novels using LLM
+2. **Verification (Local/CPU)**: Query the graph to verify claims - no LLM needed
+
+## Key Features
+
+- **Graph-based verification**: No LLM hallucination in the verification step
+- **Closed-world semantics**: Family relations (sibling_of, parent_of) use closed-world assumption - if not in graph, it's FALSE
+- **Open-world semantics**: Emotional relations (likes, knows) use open-world assumption - if not in graph, it's UNKNOWN
+- **Trait conflict detection**: Axis-based ontology detects contradictions (violent vs peaceful)
+- **Temporal reasoning**: Event ordering verification
 
 ## Quick Start
 
-1. **Install dependencies:**
-   ```bash
-   pip install -r requirements.txt
-   ```
-
-2. **Configure settings:**
-   Edit `config.yaml` to specify Gutenberg book IDs and model settings.
-
-3. **Run the pipeline:**
-   ```bash
-   python main.py
-   ```
-
-Results will be saved to `results.csv`.
-
-## System Requirements
-
-- **RAM**: 16GB+ recommended (8GB minimum)
-- **GPU**: Optional but recommended for faster inference (CUDA-compatible or Apple Silicon)
-- **Python**: 3.8 or higher
-- **Disk Space**: ~5GB for models and cached books
-
-## Installation
-
-### 1. Create and activate virtual environment
-
-```bash
-# Create virtual environment (if not already created)
-python -m venv venv
-
-# Activate virtual environment
-# On macOS/Linux:
-source venv/bin/activate
-# On Windows:
-venv\Scripts\activate
-```
-
-### 2. Install dependencies
+### 1. Install dependencies
 
 ```bash
 pip install -r requirements.txt
 ```
 
-**Note**: The first run will download transformer models (~2-5GB). Ensure you have sufficient disk space and a stable internet connection.
-
-### 3. Verify installation
+### 2. Set up API key (if using Gemini)
 
 ```bash
-python -c "import pathway; import transformers; print('Installation successful!')"
+export GOOGLE_API_KEY="your-api-key"
 ```
 
-## Configuration
-
-Edit `config.yaml` to customize the pipeline:
-
-### Gutenberg Books
-
-```yaml
-gutenberg_books:
-  - 1342  # Pride and Prejudice
-  - 11    # Alice in Wonderland
-```
-
-### Model Settings
-
-```yaml
-models:
-  embedding: "sentence-transformers/all-MiniLM-L6-v2"  # Embedding model
-  llm: "microsoft/phi-2"  # Language model for consistency checking
-  device: "auto"  # auto, cuda, cpu, or mps
-```
-
-### Pathway Settings
-
-```yaml
-pathway:
-  chunk_size: 500      # Characters per chunk
-  chunk_overlap: 50    # Overlap between chunks
-```
-
-### Inference Settings
-
-```yaml
-inference:
-  max_tokens: 256      # Maximum tokens to generate
-  batch_size: 4        # Batch size for processing claims
-```
-
-### Retrieval Settings
-
-```yaml
-retrieval:
-  top_k: 5  # Number of passages to retrieve per claim
-```
-
-## Finding Gutenberg Books
-
-1. Visit [Project Gutenberg](https://www.gutenberg.org/)
-2. Search for books by title or author
-3. Open the book's page
-4. The book ID is in the URL: `https://www.gutenberg.org/ebooks/1342` → ID is `1342`
-
-### Popular Book IDs
-
-- `1342` - Pride and Prejudice (Jane Austen)
-- `11` - Alice's Adventures in Wonderland (Lewis Carroll)
-- `84` - Frankenstein (Mary Shelley)
-- `2701` - Moby Dick (Herman Melville)
-- `74` - The Adventures of Tom Sawyer (Mark Twain)
-
-## Usage
-
-### Basic Usage
-
-Run the pipeline with default settings:
+### 3. Run verification
 
 ```bash
+# Demo mode with sample claims
 python main.py
+
+# Single claim
+python main.py --claim "Alice fell into a rabbit hole"
+
+# Multiple claims (backstory)
+python main.py --backstory "Alice fell into a rabbit hole. The Mad Hatter is violent."
 ```
 
-The pipeline will:
-1. Download specified Gutenberg books
-2. Index them into the vector store
-3. Process test cases
-4. Generate `results.csv`
+## World Data Structure
 
-### Sample Test Case
+The `world/` folder contains the pre-built knowledge graph:
 
-The pipeline includes a hardcoded test case using Pride and Prejudice. To add your own test cases, modify `main.py` or extend it to read from a file.
+| File | Description |
+|------|-------------|
+| `entities.json` | Characters, locations, objects with aliases |
+| `events.json` | Actions with verb, timestamp, and chapter |
+| `edges.json` | Relationships: agent, patient, destination, sibling_of, etc. |
+| `traits.json` | Character traits with axis and polarity |
+| `chapters.json` | Chapter metadata |
+| `relation_types.json` | Closed-world vs open-world relation definitions |
+| `trait_axes.json` | Trait axis definitions (violence, courage, etc.) |
 
-### Output Format
+## Building a New World
 
-Results are saved to `results.csv` with the following columns:
+Use `build_world_colab.py` in Google Colab for GPU-accelerated extraction:
 
-- `story_id`: Unique identifier for the test case
-- `prediction`: `0` (inconsistent) or `1` (consistent)
-- `rationale`: Brief explanation of the prediction
+```python
+# In Colab with GPU runtime
+!pip install transformers torch accelerate bitsandbytes
 
-Example:
+from build_world_colab import build_world_from_file
+
+build_world_from_file(
+    "/content/your_novel.txt",
+    output_dir="/content/world",
+    model_name="Qwen/Qwen2.5-3B-Instruct",
+    use_4bit=True
+)
+```
+
+Download the generated `world/` folder and place it in the project root.
+
+## Verification Logic
+
+### Relation Types
+
+| Type | Relations | Missing Edge Means |
+|------|-----------|-------------------|
+| **Closed-world** | sibling_of, parent_of, married_to, owns | FALSE |
+| **Open-world** | likes, knows, helps, fears, agent, patient | UNKNOWN |
+
+### Trait Conflict Detection
+
+Traits on the same axis with opposite polarity create conflicts:
+
+| Axis | Positive (+1) | Negative (-1) |
+|------|---------------|---------------|
+| violence | violent, aggressive | peaceful, gentle |
+| courage | brave, fearless | cowardly, timid |
+| honesty | truthful, sincere | dishonest, deceptive |
+| empathy | kind, compassionate | cruel, callous |
+
+Example: If a character has trait "violent" (+1 violence), claiming they are "peaceful" (-1 violence) returns FALSE.
+
+## Output Format
+
+Results are saved to `results.csv`:
 
 ```csv
-story_id,prediction,rationale
-test_001,1,All 5 claims are consistent with the evidence. Key findings: The evidence confirms Elizabeth Bennet's character development...
+story_id,counts,rationale
+alice_test,"{'true': 2, 'false': 1, 'unknown': 1}","2 claims verified true, 1 false, 1 unknown"
 ```
-
-## Troubleshooting
-
-### CUDA Out of Memory
-
-**Error**: `RuntimeError: CUDA out of memory`
-
-**Solution**:
-1. Reduce `batch_size` in `config.yaml` (try `1` or `2`)
-2. Use a smaller model (e.g., `TinyLlama/TinyLlama-1.1B-Chat-v1.0`)
-3. Set `device: "cpu"` in `config.yaml` (slower but uses less memory)
-
-### Model Download Issues
-
-**Error**: `ConnectionError` or `TimeoutError` during model download
-
-**Solution**:
-1. Check internet connection
-2. Manually download models using HuggingFace CLI:
-   ```bash
-   pip install huggingface_hub
-   huggingface-cli download microsoft/phi-2
-   ```
-3. Set `HF_HOME` environment variable to specify cache directory
-
-### Pathway Setup Errors
-
-**Error**: `ImportError: No module named 'pathway'`
-
-**Solution**:
-1. Ensure virtual environment is activated
-2. Reinstall: `pip install --upgrade pathway>=0.7.0`
-3. Check Python version: `python --version` (requires 3.8+)
-
-### Gutenberg Download Failures
-
-**Error**: `ValueError: Failed to download book`
-
-**Solution**:
-1. Check book ID is valid on Project Gutenberg
-2. Verify internet connection
-3. Check if book is available in your region
-4. Try a different book ID
-
-### Slow Performance
-
-**Solutions**:
-1. Use GPU: Set `device: "cuda"` in `config.yaml`
-2. Reduce `chunk_size` in Pathway settings
-3. Reduce `top_k` in retrieval settings
-4. Use smaller embedding model
-
-## Model Selection
-
-### Recommended Models
-
-1. **microsoft/phi-2** (2.7B parameters)
-   - Good balance of quality and speed
-   - Recommended for most use cases
-
-2. **TinyLlama/TinyLlama-1.1B-Chat-v1.0** (1.1B parameters)
-   - Faster inference, lower memory
-   - Good for testing or limited resources
-
-3. **stabilityai/stablelm-3b-4e1t** (3B parameters)
-   - Higher quality, slower inference
-   - Good for production use
-
-### Changing Models
-
-Edit `config.yaml`:
-
-```yaml
-models:
-  llm: "TinyLlama/TinyLlama-1.1B-Chat-v1.0"  # Change this line
-```
-
-### Embedding Models
-
-The default `sentence-transformers/all-MiniLM-L6-v2` is fast and efficient. Alternatives:
-
-- `sentence-transformers/all-mpnet-base-v2` (higher quality, slower)
-- `sentence-transformers/all-MiniLM-L12-v2` (balanced)
 
 ## Project Structure
 
 ```
-project_root/
+kdsh/
+├── main.py                    # Orchestration & CLI
+├── build_world_colab.py       # World builder (Colab/GPU)
+├── config.yaml                # Configuration (provider, model settings)
+├── requirements.txt           # Dependencies
 ├── src/
-│   ├── __init__.py
-│   ├── data_loader.py          # Gutenberg download & text processing
-│   ├── pathway_setup.py        # Pathway vector store initialization
-│   ├── claim_extractor.py      # Backstory parsing & claim extraction
-│   ├── retrieval.py            # Hybrid search (semantic + keyword)
-│   ├── consistency_checker.py  # LLM-based consistency checking
-│   └── classifier.py          # Evidence aggregation & final prediction
-├── main.py                     # Orchestration & test case execution
-├── requirements.txt            # All dependencies
-├── config.yaml                 # Configuration
-├── README.md                   # This file
-├── results.csv                 # Generated output
-├── pipeline.log                # Log file
-└── cache/
-    └── books/                  # Cached Gutenberg books
+│   ├── __init__.py            # Package init
+│   ├── graph_schema.py        # Core data structures (WorldGraph, Entity, Event, Edge)
+│   ├── graph_builder.py       # Load world from JSON files
+│   ├── graph_verifier.py      # Verification engine (verify_claim)
+│   ├── claim_parser.py        # LLM-based claim parsing (Gemini/local)
+│   ├── claim_extractor.py     # Backstory sentence splitting
+│   ├── trait_ontology.py      # Trait axis & conflict detection
+│   ├── classifier.py          # Result aggregation
+│   └── consistency_checker.py # Model loading utilities
+└── world/                     # Pre-built knowledge graph
+    ├── entities.json
+    ├── events.json
+    ├── edges.json
+    ├── traits.json
+    └── ...
 ```
 
-## Code Quality
+## Configuration
 
-- **Type Hints**: All functions include type hints
-- **Docstrings**: Google-style docstrings for all modules
-- **Logging**: Comprehensive logging (not print statements)
-- **Error Handling**: Try-except blocks at module boundaries
-- **Config-Driven**: No hardcoded values
+Edit `config.yaml` to switch between claim parsing providers:
 
-## Performance Optimizations
+```yaml
+claim_parser:
+  provider: "gemini"  # Options: "gemini", "local"
 
-- Model loaded once, reused for all inferences
-- Batch processing for multiple claims
-- `torch.no_grad()` for inference efficiency
-- Incremental CSV writing
-- Local caching of downloaded books
+  gemini:
+    model: "gemini-1.5-flash"
+    # Set GOOGLE_API_KEY environment variable
+
+  local:
+    model: "Qwen/Qwen2.5-3B-Instruct"
+    device: "auto"
+```
+
+- **gemini**: Uses Google's Gemini API (requires `GOOGLE_API_KEY` env var)
+- **local**: Uses local HuggingFace model (requires GPU for reasonable speed)
+
+## Requirements
+
+- Python 3.8+
+- 8GB RAM (16GB recommended)
+- For Gemini provider: `GOOGLE_API_KEY` environment variable
+- For local provider: GPU recommended (CPU works but slower)
 
 ## License
 
-This project is part of the Kharagpur Data Science Hackathon - Track A.
-
-## Support
-
-For issues or questions:
-1. Check the troubleshooting section above
-2. Review log file: `pipeline.log`
-3. Verify configuration in `config.yaml`
+Kharagpur Data Science Hackathon - Track A

@@ -1,7 +1,7 @@
 transformers>=4.35.0
 torch>=2.0.0
-gutenbergpy>=0.1.5
 pyyaml>=6.0
 pandas>=2.0.0
 python-dotenv>=1.0.0
 tqdm>=4.66.0
+google-genai>=1.0.0

@@ -1,0 +1,51 @@
+{
+  "violence": {
+    "violent": 1,
+    "brutal": 1,
+    "aggressive": 1,
+    "peaceful": -1,
+    "gentle": -1,
+    "calm": -1
+  },
+  "empathy": {
+    "kind": 1,
+    "compassionate": 1,
+    "caring": 1,
+    "cruel": -1,
+    "heartless": -1,
+    "callous": -1
+  },
+  "courage": {
+    "brave": 1,
+    "courageous": 1,
+    "fearless": 1,
+    "cowardly": -1,
+    "timid": -1,
+    "fearful": -1
+  },
+  "intelligence": {
+    "intelligent": 1,
+    "smart": 1,
+    "clever": 1,
+    "wise": 1,
+    "foolish": -1,
+    "stupid": -1,
+    "naive": -1
+  },
+  "honesty": {
+    "honest": 1,
+    "truthful": 1,
+    "sincere": 1,
+    "deceitful": -1,
+    "dishonest": -1,
+    "lying": -1
+  },
+  "social": {
+    "friendly": 1,
+    "sociable": 1,
+    "outgoing": 1,
+    "shy": -1,
+    "withdrawn": -1,
+    "antisocial": -1
+  }
+}

@@ -1,0 +1,27 @@
+{
+  "closed_world": [
+    "parent_of",
+    "child_of",
+    "sibling_of",
+    "married_to",
+    "spouse_of",
+    "owns",
+    "part_of"
+  ],
+  "open_world": [
+    "knows",
+    "likes",
+    "loves",
+    "hates",
+    "helps",
+    "threatens",
+    "fears",
+    "trusts",
+    "admires",
+    "agent",
+    "patient",
+    "destination",
+    "location",
+    "instrument"
+  ]
+}

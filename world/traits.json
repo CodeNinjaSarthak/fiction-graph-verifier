@@ -1,0 +1,62 @@
+{
+  "alice": {
+    "intelligence": {
+      "curious": [
+        1,
+        null
+      ]
+    },
+    "empathy": {
+      "empathetic": [
+        1,
+        null
+      ]
+    },
+    "honesty": {
+      "truthful": [
+        1,
+        null
+      ]
+    }
+  },
+  "mouse": {
+    "empathy": {
+      "frightened": [
+        -1,
+        null
+      ]
+    }
+  },
+  "pigeon": {
+    "violence": {
+      "violent": [
+        -1,
+        null
+      ]
+    }
+  },
+  "queen_of_hearts": {
+    "violence": {
+      "violent": [
+        1,
+        null
+      ]
+    }
+  },
+  "duchess": {
+    "empathy": {
+      "empathetic": [
+        1,
+        null
+      ]
+    }
+  },
+  "queen": {
+    "violence": {
+      "violent": [
+        -1,
+        null
+      ]
+    }
+  }
+}

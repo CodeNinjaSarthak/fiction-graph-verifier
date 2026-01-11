@@ -1,0 +1,74 @@
+{
+  "1": {
+    "num": 1,
+    "title": "CHAPTER I.",
+    "first_event": "E1",
+    "last_event": "E30"
+  },
+  "2": {
+    "num": 2,
+    "title": "CHAPTER II.",
+    "first_event": "E31",
+    "last_event": "E48"
+  },
+  "3": {
+    "num": 3,
+    "title": "CHAPTER III.",
+    "first_event": "E49",
+    "last_event": "E79"
+  },
+  "4": {
+    "num": 4,
+    "title": "CHAPTER IV.",
+    "first_event": "E80",
+    "last_event": "E114"
+  },
+  "5": {
+    "num": 5,
+    "title": "CHAPTER V.",
+    "first_event": "E115",
+    "last_event": "E146"
+  },
+  "6": {
+    "num": 6,
+    "title": "CHAPTER VI.",
+    "first_event": "E147",
+    "last_event": "E177"
+  },
+  "7": {
+    "num": 7,
+    "title": "CHAPTER VII.",
+    "first_event": "E178",
+    "last_event": "E199"
+  },
+  "8": {
+    "num": 8,
+    "title": "CHAPTER VIII.",
+    "first_event": "E200",
+    "last_event": "E235"
+  },
+  "9": {
+    "num": 9,
+    "title": "CHAPTER IX.",
+    "first_event": "E236",
+    "last_event": "E262"
+  },
+  "10": {
+    "num": 10,
+    "title": "CHAPTER X.",
+    "first_event": "E263",
+    "last_event": "E276"
+  },
+  "11": {
+    "num": 11,
+    "title": "CHAPTER XI.",
+    "first_event": "E277",
+    "last_event": "E310"
+  },
+  "12": {
+    "num": 12,
+    "title": "CHAPTER XII.",
+    "first_event": "E311",
+    "last_event": "E345"
+  }
+}

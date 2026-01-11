@@ -1,329 +1,264 @@
 """
-LLM-based extraction of entities and relations from book text.
-Builds a WorldGraph from text chunks.
+Load WorldGraph from compiled JSON files.
+The world is built offline (in Colab) and loaded at runtime.
+
+This replaces LLM-based extraction with file-based loading.
 """
 
 import json
-import re
 import logging
-from typing import List, Dict, Any, Optional
-import torch
+from pathlib import Path
+from typing import Optional
 
 from src.graph_schema import (
-    Entity, EntityType, Relation, WorldGraph,
+    Entity, EntityType, Event, Edge, Trait, WorldGraph,
+    WorldType, get_relation_world_type,
     normalize_entity_name, normalize_predicate
 )
+from src.trait_ontology import get_trait_axis_name
 
 logger = logging.getLogger(__name__)
 
 
-# Prompt for extracting entities from text
-ENTITY_EXTRACTION_PROMPT = """Extract all named entities from the following text passage.
-
-For each entity, identify:
-1. name: The entity's name as it appears in text
-2. type: One of CHARACTER, LOCATION, or OBJECT
-3. aliases: Any alternate names or pronouns used for this entity
-
-Return ONLY a valid JSON array. No explanation or other text.
-
-Text:
-{chunk_text}
-
-Output format example:
-[
-  {{"name": "Alice", "type": "CHARACTER", "aliases": ["she", "the girl"]}},
-  {{"name": "Wonderland", "type": "LOCATION", "aliases": []}},
-  {{"name": "rabbit hole", "type": "LOCATION", "aliases": ["the hole"]}}
-]
-
-Entities:"""
+def _parse_polarity_conf(polarity_conf):
+    """Parse polarity and confidence from trait data."""
+    if isinstance(polarity_conf, list):
+        polarity = polarity_conf[0] if polarity_conf else 1
+        confidence = polarity_conf[1] if len(polarity_conf) > 1 else None
+        time_range = polarity_conf[2] if len(polarity_conf) > 2 else None
+    else:
+        polarity = polarity_conf
+        confidence = None
+        time_range = None
+    return polarity, confidence, time_range
 
 
-# Prompt for extracting relations from text
-RELATION_EXTRACTION_PROMPT = """Extract relationships and events between entities from this text.
-
-Known entities in this passage: {entity_list}
-
-For each relationship, identify:
-1. subject: The entity performing the action
-2. predicate: The action or relationship (use simple verb phrases like: falls_into, has_tea_with, meets, threatens, orders)
-3. object: The entity receiving the action, or an attribute/trait
-4. negated: true only if the text explicitly says something does NOT happen
-
-Also extract character traits as: {{"subject": "Character", "predicate": "has_trait", "object": "trait_name"}}
-Example traits: violent, cruel, kind, curious, angry, peaceful
-
-Return ONLY a valid JSON array. No explanation.
-
-Text:
-{chunk_text}
-
-Output format example:
-[
-  {{"subject": "Alice", "predicate": "falls_into", "object": "rabbit hole", "negated": false}},
-  {{"subject": "Queen of Hearts", "predicate": "has_trait", "object": "violent", "negated": false}},
-  {{"subject": "Queen of Hearts", "predicate": "orders", "object": "execution", "negated": false}}
-]
-
-Relations:"""
-
-
-def parse_llm_json(output: str) -> List[Dict[str, Any]]:
+def load_graph_from_world(world_dir: str = "world") -> WorldGraph:
     """
-    Parse JSON array from LLM output.
-    Handles cases where LLM includes extra text around JSON.
-    """
-    if not output:
-        return []
+    Load a WorldGraph from JSON files in the world directory.
 
-    # Try to find JSON array in output
-    # First try to find array brackets
-    match = re.search(r'\[[\s\S]*?\]', output)
-    if match:
-        try:
-            return json.loads(match.group())
-        except json.JSONDecodeError:
-            pass
+    This is the main entry point for loading a pre-compiled world.
+    The world is built by build_world_colab.py on GPU and downloaded.
 
-    # Try parsing the whole output
-    try:
-        result = json.loads(output.strip())
-        if isinstance(result, list):
-            return result
-    except json.JSONDecodeError:
-        pass
-
-    logger.debug(f"Failed to parse JSON from LLM output: {output[:200]}")
-    return []
-
-
-def generate_text(
-    prompt: str,
-    model: Any,
-    tokenizer: Any,
-    max_new_tokens: int = 512
-) -> str:
-    """Generate text from LLM given a prompt."""
-    try:
-        inputs = tokenizer(prompt, return_tensors="pt", truncation=True, max_length=1024)
-
-        # Move to model's device
-        if hasattr(model, 'device'):
-            model_device = next(model.parameters()).device
-        else:
-            model_device = 'cpu'
-
-        inputs = {k: v.to(model_device) for k, v in inputs.items()}
-
-        with torch.no_grad():
-            outputs = model.generate(
-                **inputs,
-                max_new_tokens=max_new_tokens,
-                do_sample=False,
-                pad_token_id=tokenizer.eos_token_id,
-                eos_token_id=tokenizer.eos_token_id
-            )
-
-        generated_text = tokenizer.decode(outputs[0], skip_special_tokens=True)
-
-        # Extract only newly generated text
-        prompt_decoded = tokenizer.decode(inputs['input_ids'][0], skip_special_tokens=True)
-        new_text = generated_text[len(prompt_decoded):].strip()
-
-        return new_text
-
-    except Exception as e:
-        logger.error(f"Error generating text: {str(e)}")
-        return ""
-
-
-def extract_entities(
-    chunk_text: str,
-    model: Any,
-    tokenizer: Any,
-    existing_entities: Optional[Dict[str, Entity]] = None
-) -> List[Entity]:
-    """
-    Extract entities from a text chunk using LLM.
+    Expected files:
+        - world/entities.json
+        - world/events.json
+        - world/edges.json
+        - world/traits.json
+        - world/chapters.json (optional metadata)
 
     Args:
-        chunk_text: Text passage to extract entities from
-        model: Loaded LLM model
-        tokenizer: Loaded tokenizer
-        existing_entities: Already known entities for context
+        world_dir: Path to directory containing JSON files
 
     Returns:
-        List of Entity objects
-    """
-    if not chunk_text.strip():
-        return []
+        Populated WorldGraph
 
-    # Truncate chunk if too long
-    chunk_text = chunk_text[:2000]
-
-    prompt = ENTITY_EXTRACTION_PROMPT.format(chunk_text=chunk_text)
-    output = generate_text(prompt, model, tokenizer, max_new_tokens=512)
-
-    entities = []
-    parsed = parse_llm_json(output)
-
-    for item in parsed:
-        if not isinstance(item, dict):
-            continue
-
-        name = item.get('name', '').strip()
-        if not name:
-            continue
-
-        type_str = item.get('type', 'OBJECT').upper()
-        try:
-            entity_type = EntityType[type_str]
-        except KeyError:
-            entity_type = EntityType.OBJECT
-
-        aliases = set(item.get('aliases', []))
-        canonical = normalize_entity_name(name)
-
-        entity = Entity(
-            canonical_name=canonical,
-            display_name=name,
-            entity_type=entity_type,
-            aliases=aliases
-        )
-        entities.append(entity)
-
-    logger.debug(f"Extracted {len(entities)} entities from chunk")
-    return entities
-
-
-def extract_relations(
-    chunk_text: str,
-    entities: List[Entity],
-    model: Any,
-    tokenizer: Any
-) -> List[Relation]:
-    """
-    Extract relations from a text chunk using LLM.
-
-    Args:
-        chunk_text: Text passage to extract relations from
-        entities: List of known entities in this chunk
-        model: Loaded LLM model
-        tokenizer: Loaded tokenizer
-
-    Returns:
-        List of Relation objects
-    """
-    if not chunk_text.strip():
-        return []
-
-    # Create entity list string for prompt
-    entity_names = [e.display_name for e in entities]
-    entity_list = ", ".join(entity_names) if entity_names else "No specific entities identified"
-
-    # Truncate chunk if too long
-    chunk_text = chunk_text[:2000]
-
-    prompt = RELATION_EXTRACTION_PROMPT.format(
-        chunk_text=chunk_text,
-        entity_list=entity_list
-    )
-    output = generate_text(prompt, model, tokenizer, max_new_tokens=512)
-
-    relations = []
-    parsed = parse_llm_json(output)
-
-    for item in parsed:
-        if not isinstance(item, dict):
-            continue
-
-        subject = item.get('subject', '').strip()
-        predicate = item.get('predicate', '').strip()
-        obj = item.get('object', '').strip()
-
-        if not subject or not predicate or not obj:
-            continue
-
-        negated = item.get('negated', False)
-        if isinstance(negated, str):
-            negated = negated.lower() == 'true'
-
-        relation = Relation(
-            subject=normalize_entity_name(subject),
-            predicate=normalize_predicate(predicate),
-            object=normalize_entity_name(obj),
-            negated=bool(negated),
-            source_text=chunk_text[:200]
-        )
-        relations.append(relation)
-
-    logger.debug(f"Extracted {len(relations)} relations from chunk")
-    return relations
-
-
-def build_graph_from_book(
-    chunks: List[str],
-    book_id: str,
-    model: Any,
-    tokenizer: Any,
-    progress_callback: Optional[callable] = None
-) -> WorldGraph:
-    """
-    Build a WorldGraph from book text chunks.
-
-    Args:
-        chunks: List of text chunks from the book
-        book_id: Identifier for the book
-        model: LLM model for extraction
-        tokenizer: Tokenizer for the model
-        progress_callback: Optional callback for progress updates
-
-    Returns:
-        WorldGraph with extracted entities and relations
+    Raises:
+        FileNotFoundError: If required files are missing
     """
     graph = WorldGraph()
-    total_chunks = len(chunks)
+    world_path = Path(world_dir)
 
-    logger.info(f"Building graph from {total_chunks} chunks for book {book_id}")
+    if not world_path.exists():
+        raise FileNotFoundError(f"World directory not found: {world_dir}")
 
-    for i, chunk in enumerate(chunks):
-        if progress_callback:
-            progress_callback(i + 1, total_chunks)
+    # Load entities
+    entities_file = world_path / "entities.json"
+    if entities_file.exists():
+        with open(entities_file, "r", encoding="utf-8") as f:
+            entities_data = json.load(f)
 
-        # Extract entities
-        entities = extract_entities(chunk, model, tokenizer, graph.entities)
+        for entity_id, entity_dict in entities_data.items():
+            # Parse entity type
+            type_str = entity_dict.get("type", "object").upper()
+            try:
+                entity_type = EntityType[type_str]
+            except KeyError:
+                entity_type = EntityType.OBJECT
 
-        # Add entities to graph with book_id
-        for entity in entities:
-            entity.book_id = book_id
-            # Check if entity already exists
-            if entity.canonical_name in graph.entities:
-                # Merge aliases
-                existing = graph.entities[entity.canonical_name]
-                existing.aliases.update(entity.aliases)
-                # Re-register aliases
-                for alias in entity.aliases:
-                    graph.alias_to_canonical[alias.lower()] = entity.canonical_name
+            # Create entity
+            entity = Entity(
+                canonical_name=entity_id,
+                display_name=entity_dict.get("display_name", entity_id),
+                entity_type=entity_type,
+                aliases=set(entity_dict.get("aliases", []))
+            )
+            graph.add_entity(entity)
+
+        logger.info(f"Loaded {len(graph.entities)} entities from {entities_file}")
+    else:
+        logger.warning(f"Entities file not found: {entities_file}")
+
+    # Load events
+    events_file = world_path / "events.json"
+    if events_file.exists():
+        with open(events_file, "r", encoding="utf-8") as f:
+            events_data = json.load(f)
+
+        for event_id, event_dict in events_data.items():
+            event = Event(
+                event_id=event_id,
+                verb=event_dict.get("verb", ""),
+                time=event_dict.get("time", 0),
+                chapter=event_dict.get("chapter", 0),
+                source_text=event_dict.get("source_text", "")
+            )
+            graph.add_event(event)
+
+        logger.info(f"Loaded {len(graph.events)} events from {events_file}")
+    else:
+        logger.warning(f"Events file not found: {events_file}")
+
+    # Load edges
+    edges_file = world_path / "edges.json"
+    if edges_file.exists():
+        with open(edges_file, "r", encoding="utf-8") as f:
+            edges_data = json.load(f)
+
+        for edge_entry in edges_data:
+            # Handle both list format [src, rel, tgt] and dict format
+            if isinstance(edge_entry, list):
+                source = edge_entry[0]
+                relation = edge_entry[1]
+                target = edge_entry[2]
+                negated = edge_entry[3] if len(edge_entry) > 3 else False
             else:
-                graph.add_entity(entity)
+                source = edge_entry.get("source", "")
+                relation = edge_entry.get("relation", "")
+                target = edge_entry.get("target", "")
+                negated = edge_entry.get("negated", False)
 
-        # Extract relations
-        relations = extract_relations(chunk, entities, model, tokenizer)
+            # Determine world type for this relation
+            world_type = get_relation_world_type(relation)
 
-        # Add relations to graph
-        for relation in relations:
-            relation.book_id = book_id
-            graph.add_relation(relation)
+            edge = Edge(
+                source=source,
+                relation=normalize_predicate(relation),
+                target=target,
+                world_type=world_type,
+                negated=bool(negated)
+            )
+            graph.add_edge(edge)
 
-        if (i + 1) % 10 == 0:
-            logger.info(f"Processed {i + 1}/{total_chunks} chunks, "
-                       f"{len(graph.entities)} entities, {len(graph.relations)} relations")
+        logger.info(f"Loaded {len(graph.edges)} edges from {edges_file}")
+    else:
+        logger.warning(f"Edges file not found: {edges_file}")
 
-    logger.info(f"Built graph for book {book_id}: "
-               f"{len(graph.entities)} entities, {len(graph.relations)} relations")
+    # Load traits
+    traits_file = world_path / "traits.json"
+    if traits_file.exists():
+        with open(traits_file, "r", encoding="utf-8") as f:
+            traits_data = json.load(f)
+
+        trait_count = 0
+        for entity_id, entity_traits in traits_data.items():
+            for key, value in entity_traits.items():
+                # Handle nested structure: {axis: {trait: [polarity, conf]}}
+                # or flat structure: {trait: [polarity, conf]}
+                if isinstance(value, dict):
+                    # Nested: key is axis_name, value is {trait_name: [polarity, conf]}
+                    axis = key
+                    for trait_name, polarity_conf in value.items():
+                        polarity, confidence, time_range = _parse_polarity_conf(polarity_conf)
+                        trait = Trait(
+                            entity_id=entity_id,
+                            trait_name=trait_name,
+                            axis=axis,
+                            polarity=polarity,
+                            confidence=confidence,
+                            time_range=time_range
+                        )
+                        graph.add_trait(trait)
+                        trait_count += 1
+                else:
+                    # Flat: key is trait_name, value is [polarity, conf]
+                    trait_name = key
+                    polarity, confidence, time_range = _parse_polarity_conf(value)
+                    axis = get_trait_axis_name(trait_name) or "unknown"
+                    trait = Trait(
+                        entity_id=entity_id,
+                        trait_name=trait_name,
+                        axis=axis,
+                        polarity=polarity,
+                        confidence=confidence,
+                        time_range=time_range
+                    )
+                    graph.add_trait(trait)
+                    trait_count += 1
+
+        logger.info(f"Loaded {trait_count} traits for {len(traits_data)} entities")
+    else:
+        logger.warning(f"Traits file not found: {traits_file}")
+
+    # Load chapters metadata (optional)
+    chapters_file = world_path / "chapters.json"
+    if chapters_file.exists():
+        with open(chapters_file, "r", encoding="utf-8") as f:
+            chapters_data = json.load(f)
+        logger.info(f"Loaded {len(chapters_data)} chapters metadata")
+
+    # Log final stats
+    stats = graph.get_stats()
+    logger.info(f"World loaded: {stats}")
 
     return graph
+
+
+def verify_world_integrity(graph: WorldGraph) -> list:
+    """
+    Verify the integrity of a loaded world graph.
+
+    Checks for:
+    - Dangling edge references (entities/events that don't exist)
+    - Trait axis consistency
+    - Event time ordering
+
+    Args:
+        graph: The loaded WorldGraph
+
+    Returns:
+        List of warning messages (empty if no issues)
+    """
+    warnings = []
+
+    # Check for dangling edge references
+    for i, edge in enumerate(graph.edges):
+        # Check source exists (could be entity or event)
+        if edge.source not in graph.entities and edge.source not in graph.events:
+            warnings.append(f"Edge {i}: source '{edge.source}' not found in entities or events")
+
+        # Check target exists
+        if edge.target not in graph.entities and edge.target not in graph.events:
+            # Target might be a literal value (like "gardening"), so just warn
+            if not edge.target.startswith("E"):
+                pass  # Acceptable for non-event targets
+            else:
+                warnings.append(f"Edge {i}: target event '{edge.target}' not found")
+
+    # Check event time ordering
+    events_ordered = graph.get_events_in_order()
+    for i in range(1, len(events_ordered)):
+        if events_ordered[i].time <= events_ordered[i-1].time:
+            if events_ordered[i].time == events_ordered[i-1].time:
+                pass  # Same time is OK (simultaneous events)
+            else:
+                warnings.append(
+                    f"Event time ordering issue: {events_ordered[i-1].event_id} (t={events_ordered[i-1].time}) "
+                    f"should come before {events_ordered[i].event_id} (t={events_ordered[i].time})"
+                )
+
+    # Check for trait axis conflicts within same entity
+    from src.trait_ontology import are_traits_conflicting
+    for entity_id, traits in graph.traits.items():
+        for i, t1 in enumerate(traits):
+            for t2 in traits[i+1:]:
+                if are_traits_conflicting(t1.trait_name, t2.trait_name):
+                    warnings.append(
+                        f"Entity '{entity_id}' has conflicting traits: "
+                        f"'{t1.trait_name}' and '{t2.trait_name}'"
+                    )
+
+    return warnings
 
 
 def merge_graphs(target: WorldGraph, source: WorldGraph) -> None:
@@ -345,9 +280,85 @@ def merge_graphs(target: WorldGraph, source: WorldGraph) -> None:
         else:
             target.add_entity(entity)
 
-    # Merge relations
-    for relation in source.relations:
-        target.add_relation(relation)
+    # Merge events
+    for event_id, event in source.events.items():
+        if event_id not in target.events:
+            target.add_event(event)
+
+    # Merge edges
+    existing_edges = {(e.source, e.relation, e.target) for e in target.edges}
+    for edge in source.edges:
+        key = (edge.source, edge.relation, edge.target)
+        if key not in existing_edges:
+            target.add_edge(edge)
+            existing_edges.add(key)
+
+    # Merge traits
+    for entity_id, traits in source.traits.items():
+        for trait in traits:
+            # Check if trait already exists
+            existing = target.traits.get(entity_id, [])
+            if not any(t.trait_name == trait.trait_name for t in existing):
+                target.add_trait(trait)
 
     logger.info(f"Merged graphs: target now has {len(target.entities)} entities, "
-               f"{len(target.relations)} relations")
+               f"{len(target.events)} events, {len(target.edges)} edges")
+
+
+def save_graph_to_world(graph: WorldGraph, world_dir: str = "world") -> None:
+    """
+    Save a WorldGraph to JSON files.
+    Useful for debugging or creating test worlds.
+
+    Args:
+        graph: The WorldGraph to save
+        world_dir: Directory to save files to
+    """
+    world_path = Path(world_dir)
+    world_path.mkdir(parents=True, exist_ok=True)
+
+    # Save entities
+    entities_data = {}
+    for entity_id, entity in graph.entities.items():
+        entities_data[entity_id] = {
+            "id": entity.canonical_name,
+            "type": entity.entity_type.value,
+            "display_name": entity.display_name,
+            "aliases": list(entity.aliases)
+        }
+
+    with open(world_path / "entities.json", "w", encoding="utf-8") as f:
+        json.dump(entities_data, f, indent=2)
+
+    # Save events
+    events_data = {}
+    for event_id, event in graph.events.items():
+        events_data[event_id] = {
+            "id": event.event_id,
+            "verb": event.verb,
+            "time": event.time,
+            "chapter": event.chapter
+        }
+
+    with open(world_path / "events.json", "w", encoding="utf-8") as f:
+        json.dump(events_data, f, indent=2)
+
+    # Save edges
+    edges_data = []
+    for edge in graph.edges:
+        edges_data.append([edge.source, edge.relation, edge.target])
+
+    with open(world_path / "edges.json", "w", encoding="utf-8") as f:
+        json.dump(edges_data, f, indent=2)
+
+    # Save traits
+    traits_data = {}
+    for entity_id, traits in graph.traits.items():
+        traits_data[entity_id] = {}
+        for trait in traits:
+            traits_data[entity_id][trait.trait_name] = [trait.polarity, trait.confidence]
+
+    with open(world_path / "traits.json", "w", encoding="utf-8") as f:
+        json.dump(traits_data, f, indent=2)
+
+    logger.info(f"Saved world to {world_dir}")

@@ -1,5 +1,6 @@
 """
 Core data structures for the Narrative Knowledge Graph.
+Extended with Event support, trait axis/polarity, and relation world-types.
 """
 
 import re
@@ -14,6 +15,60 @@ class EntityType(Enum):
     OBJECT = "object"
 
 
+class WorldType(Enum):
+    """Determines inference behavior for missing relations."""
+    CLOSED = "closed"  # Missing relation = FALSE (e.g., sibling_of)
+    OPEN = "open"      # Missing relation = UNKNOWN (e.g., likes)
+
+
+# Relation world-type registry
+# Closed-world: if both entities are known but relation is absent, it's FALSE
+# Open-world: if relation is absent, it's UNKNOWN
+RELATION_WORLD_TYPES: Dict[str, WorldType] = {
+    # Closed-world relations (family, formal relationships)
+    "sibling_of": WorldType.CLOSED,
+    "is_sibling_of": WorldType.CLOSED,
+    "brother_of": WorldType.CLOSED,
+    "is_brother_of": WorldType.CLOSED,
+    "sister_of": WorldType.CLOSED,
+    "is_sister_of": WorldType.CLOSED,
+    "married_to": WorldType.CLOSED,
+    "is_married_to": WorldType.CLOSED,
+    "parent_of": WorldType.CLOSED,
+    "is_parent_of": WorldType.CLOSED,
+    "child_of": WorldType.CLOSED,
+    "is_child_of": WorldType.CLOSED,
+    "mother_of": WorldType.CLOSED,
+    "is_mother_of": WorldType.CLOSED,
+    "father_of": WorldType.CLOSED,
+    "is_father_of": WorldType.CLOSED,
+    "son_of": WorldType.CLOSED,
+    "is_son_of": WorldType.CLOSED,
+    "daughter_of": WorldType.CLOSED,
+    "is_daughter_of": WorldType.CLOSED,
+
+    # Open-world relations (can be unknown)
+    "likes": WorldType.OPEN,
+    "loves": WorldType.OPEN,
+    "hates": WorldType.OPEN,
+    "knows": WorldType.OPEN,
+    "helps": WorldType.OPEN,
+    "threatens": WorldType.OPEN,
+    "fears": WorldType.OPEN,
+    "respects": WorldType.OPEN,
+    "trusts": WorldType.OPEN,
+    "works_with": WorldType.OPEN,
+    "lives_in": WorldType.OPEN,
+    "owns": WorldType.OPEN,
+}
+
+
+def get_relation_world_type(predicate: str) -> WorldType:
+    """Get the world type for a relation predicate."""
+    pred_normalized = normalize_predicate(predicate)
+    return RELATION_WORLD_TYPES.get(pred_normalized, WorldType.OPEN)
+
+
 @dataclass
 class Entity:
     """A node in the knowledge graph representing a named entity."""
@@ -25,25 +80,67 @@ class Entity:
 
 
 @dataclass
+class Event:
+    """A node representing an action/event with temporal ordering."""
+    event_id: str              # "E1", "E2", etc.
+    verb: str                  # "fall", "meet", "drink"
+    time: int                  # Monotonic sequence number
+    chapter: int = 0           # Chapter number
+    source_text: str = ""      # Original text snippet
+
+
+@dataclass
+class Trait:
+    """A character trait with axis-based conflict detection."""
+    entity_id: str             # Who has the trait
+    trait_name: str            # "violent", "kind", etc.
+    axis: str                  # "violence", "kindness", etc.
+    polarity: int              # +1 or -1
+    time_range: Optional[List[Optional[int]]] = None  # [start, end] or [start, null]
+    confidence: Optional[float] = None
+
+
+@dataclass
+class Edge:
+    """A typed edge in the knowledge graph."""
+    source: str                # Entity or Event ID
+    relation: str              # Relation type
+    target: str                # Entity or Event ID
+    world_type: WorldType = WorldType.OPEN
+    negated: bool = False
+    source_text: str = ""
+
+
+# Keep Relation for backward compatibility (deprecated)
+@dataclass
 class Relation:
-    """An edge in the knowledge graph representing a relationship or event."""
-    subject: str                 # Canonical entity name
-    predicate: str               # Action/relationship: "fell_into", "has_tea_with"
-    object: str                  # Canonical entity name or attribute
-    negated: bool = False        # True if "does NOT do X"
-    source_text: str = ""        # Original text snippet for reference
+    """An edge in the knowledge graph (deprecated - use Edge instead)."""
+    subject: str
+    predicate: str
+    object: str
+    negated: bool = False
+    source_text: str = ""
     book_id: str = ""
 
 
 @dataclass
 class WorldGraph:
     """
-    The complete knowledge graph for one or more books.
-    Stores entities, relations, and indices for fast lookup.
+    Enhanced knowledge graph with event support.
     """
     entities: Dict[str, Entity] = field(default_factory=dict)
-    relations: List[Relation] = field(default_factory=list)
+    events: Dict[str, Event] = field(default_factory=dict)
+    edges: List[Edge] = field(default_factory=list)
+    traits: Dict[str, List[Trait]] = field(default_factory=dict)  # entity_id -> [Trait]
+
+    # Indices for fast lookup
     alias_to_canonical: Dict[str, str] = field(default_factory=dict)
+    source_index: Dict[str, List[int]] = field(default_factory=dict)
+    target_index: Dict[str, List[int]] = field(default_factory=dict)
+    relation_index: Dict[str, List[int]] = field(default_factory=dict)
+
+    # Backward compatibility: keep old relation storage
+    relations: List[Relation] = field(default_factory=list)
     subject_index: Dict[str, List[int]] = field(default_factory=dict)
     object_index: Dict[str, List[int]] = field(default_factory=dict)
     predicate_index: Dict[str, List[int]] = field(default_factory=dict)
@@ -60,8 +157,41 @@ class WorldGraph:
         for alias in entity.aliases:
             self.alias_to_canonical[alias.lower()] = entity.canonical_name
 
+    def add_event(self, event: Event) -> None:
+        """Add an event to the graph."""
+        self.events[event.event_id] = event
+
+    def add_edge(self, edge: Edge) -> int:
+        """Add an edge and update indices."""
+        idx = len(self.edges)
+        self.edges.append(edge)
+
+        # Update source index
+        if edge.source not in self.source_index:
+            self.source_index[edge.source] = []
+        self.source_index[edge.source].append(idx)
+
+        # Update target index
+        if edge.target not in self.target_index:
+            self.target_index[edge.target] = []
+        self.target_index[edge.target].append(idx)
+
+        # Update relation index
+        rel_key = edge.relation.lower()
+        if rel_key not in self.relation_index:
+            self.relation_index[rel_key] = []
+        self.relation_index[rel_key].append(idx)
+
+        return idx
+
+    def add_trait(self, trait: Trait) -> None:
+        """Add a trait for an entity."""
+        if trait.entity_id not in self.traits:
+            self.traits[trait.entity_id] = []
+        self.traits[trait.entity_id].append(trait)
+
     def add_relation(self, relation: Relation) -> int:
-        """Add a relation to the graph and update indices. Returns relation index."""
+        """Add a relation to the graph and update indices (backward compat)."""
         idx = len(self.relations)
         self.relations.append(relation)
 
@@ -90,15 +220,45 @@ class WorldGraph:
         normalized = normalize_entity_name(name)
         return self.alias_to_canonical.get(normalized) or self.alias_to_canonical.get(name.lower())
 
+    def get_edges_from(self, source: str) -> List[Edge]:
+        """Get all edges originating from a node."""
+        if source not in self.source_index:
+            return []
+        return [self.edges[i] for i in self.source_index[source]]
+
+    def get_edges_to(self, target: str) -> List[Edge]:
+        """Get all edges pointing to a node."""
+        if target not in self.target_index:
+            return []
+        return [self.edges[i] for i in self.target_index[target]]
+
+    def get_entity_traits(self, entity_id: str) -> List[Trait]:
+        """Get all traits for an entity."""
+        canonical = self.resolve_entity(entity_id)
+        if not canonical:
+            canonical = entity_id
+        return self.traits.get(canonical, [])
+
+    def get_event_by_time(self, time: int) -> Optional[Event]:
+        """Get event at a specific time point."""
+        for event in self.events.values():
+            if event.time == time:
+                return event
+        return None
+
+    def get_events_in_order(self) -> List[Event]:
+        """Get all events sorted by time."""
+        return sorted(self.events.values(), key=lambda e: e.time)
+
     def get_relations_for_subject(self, subject: str) -> List[Relation]:
-        """Get all relations where entity is the subject."""
+        """Get all relations where entity is the subject (backward compat)."""
         canonical = self.resolve_entity(subject)
         if not canonical or canonical not in self.subject_index:
             return []
         return [self.relations[i] for i in self.subject_index[canonical]]
 
     def get_relations_for_object(self, obj: str) -> List[Relation]:
-        """Get all relations where entity is the object."""
+        """Get all relations where entity is the object (backward compat)."""
         canonical = self.resolve_entity(obj)
         if not canonical or canonical not in self.object_index:
             return []
@@ -111,7 +271,7 @@ class WorldGraph:
         obj: Optional[str] = None
     ) -> List[Relation]:
         """
-        Query for relations matching the pattern.
+        Query for relations matching the pattern (backward compat).
         None values act as wildcards.
         """
         # Resolve entity aliases
@@ -149,6 +309,58 @@ class WorldGraph:
 
         return [self.relations[i] for i in candidate_indices]
 
+    def query_edges(
+        self,
+        source: Optional[str] = None,
+        relation: Optional[str] = None,
+        target: Optional[str] = None
+    ) -> List[Edge]:
+        """
+        Query for edges matching the pattern.
+        None values act as wildcards.
+        """
+        # Resolve entity aliases
+        src_canonical = self.resolve_entity(source) if source else None
+        tgt_canonical = self.resolve_entity(target) if target else None
+
+        # Start with smallest index set for efficiency
+        candidate_indices: Optional[Set[int]] = None
+
+        if src_canonical and src_canonical in self.source_index:
+            candidate_indices = set(self.source_index[src_canonical])
+        elif source and source in self.source_index:
+            # Try direct lookup (for event IDs)
+            candidate_indices = set(self.source_index[source])
+
+        if tgt_canonical and tgt_canonical in self.target_index:
+            tgt_indices = set(self.target_index[tgt_canonical])
+            if candidate_indices is None:
+                candidate_indices = tgt_indices
+            else:
+                candidate_indices &= tgt_indices
+        elif target and target in self.target_index:
+            tgt_indices = set(self.target_index[target])
+            if candidate_indices is None:
+                candidate_indices = tgt_indices
+            else:
+                candidate_indices &= tgt_indices
+
+        if relation:
+            rel_key = relation.lower()
+            if rel_key in self.relation_index:
+                rel_indices = set(self.relation_index[rel_key])
+                if candidate_indices is None:
+                    candidate_indices = rel_indices
+                else:
+                    candidate_indices &= rel_indices
+            else:
+                return []
+
+        if candidate_indices is None:
+            return list(self.edges)
+
+        return [self.edges[i] for i in candidate_indices]
+
     def get_stats(self) -> Dict[str, int]:
         """Get statistics about the graph."""
         unique_books = set()
@@ -161,8 +373,11 @@ class WorldGraph:
 
         return {
             "total_entities": len(self.entities),
+            "total_events": len(self.events),
+            "total_edges": len(self.edges),
             "total_relations": len(self.relations),
             "total_aliases": len(self.alias_to_canonical),
+            "total_traits": sum(len(t) for t in self.traits.values()),
             "unique_books": len(unique_books),
         }
 

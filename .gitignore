@@ -82,12 +82,8 @@ desktop.ini
 *.bak
 *.swp
 
-# Data files (if large)
-*.csv
-*.json
-!config.yaml
+# Output files
+results.csv
 
 # Large text files (cached books)
 cache/books/*.txt
-
-texts/
